@@ -1,51 +1,59 @@
 const express = require('express');
 const { chromium } = require('playwright');
-const cors = require('cors');
+const bodyParser = require('body-parser');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const PORT = process.env.PORT || 10000;
+
+app.use(bodyParser.json());
 
 app.post('/scrape', async (req, res) => {
-  const { url, limit = 5 } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL não fornecida' });
+  const { url, limit } = req.body;
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  if (!url || !limit) {
+    return res.status(400).json({ error: 'Parâmetros ausentes: url e limit são obrigatórios.' });
+  }
+
+  let browser;
 
   try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    // ⬇️ Exemplo genérico para VTEX — você pode adaptar depois
-    const productLinks = await page.$$eval('a[href*="/p"]', links =>
-      [...new Set(links.map(link => link.href))].slice(0, 5)
-    );
+    // Aguarda links de produto aparecerem
+    await page.waitForSelector('a[href*="/p"]', { timeout: 10000 });
 
-    const results = [];
+    // Extrai todos os links que parecem ser de produtos
+    const productLinks = await page.$$eval('a[href*="/p"]', (elements) => {
+      const hrefs = elements.map((el) => el.href);
+      return [...new Set(hrefs)].slice(0, 10); // Remove duplicados, pega no máximo 10
+    });
 
-    for (const link of productLinks.slice(0, limit)) {
-      const prodPage = await browser.newPage();
-      await prodPage.goto(link, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-      const title = await prodPage.$eval('[class*=productName]', el => el.textContent.trim()).catch(() => '');
-      const price = await prodPage.$eval('[class*=sellingPrice]', el => el.textContent.trim()).catch(() => '');
-      const image = await prodPage.$eval('img[src*="products"]', img => img.src).catch(() => '');
-      const description = await prodPage.$eval('div[class*=description]', el => el.textContent.trim()).catch(() => '');
-
-      results.push({ link, title, price, image, description });
-      await prodPage.close();
+    if (productLinks.length === 0) {
+      return res.status(404).json({ error: 'Nenhum link de produto encontrado.' });
     }
 
+    // Limita quantidade baseada no input do usuário
+    const limitedLinks = productLinks.slice(0, parseInt(limit));
+
+    // Acessa o primeiro link e extrai o HTML completo
+    const productPage = await browser.newPage();
+    await productPage.goto(limitedLinks[0], { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const htmlContent = await productPage.content();
+
     await browser.close();
-    res.json({ results });
+
+    return res.json({
+      html: htmlContent,
+      links: limitedLinks
+    });
   } catch (err) {
-    await browser.close();
-    console.error('Erro na raspagem:', err);
-    res.status(500).json({ error: 'Erro ao raspar os produtos.' });
+    if (browser) await browser.close();
+    return res.status(500).json({ error: 'Erro no scraping', details: err.message });
   }
 });
 
-const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Scraper online na porta ${PORT}`);
 });
