@@ -1,59 +1,53 @@
-const express = require('express');
-const { chromium } = require('playwright');
-const bodyParser = require('body-parser');
-
+// index.js
+const express = require("express");
+const { chromium } = require("playwright");
 const app = express();
-const PORT = process.env.PORT || 10000;
+const port = process.env.PORT || 10000;
 
-app.use(bodyParser.json());
+app.use(express.json());
 
-app.post('/scrape', async (req, res) => {
-  const { url, limit } = req.body;
+app.post("/scrape", async (req, res) => {
+  const { url, limit = 1 } = req.body;
+  if (!url) return res.status(400).json({ error: "Missing URL" });
 
-  if (!url || !limit) {
-    return res.status(400).json({ error: 'Parâmetros ausentes: url e limit são obrigatórios.' });
-  }
-
-  let browser;
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage();
 
   try {
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(url, { timeout: 60000 });
 
-    // Aguarda links de produto aparecerem
-    await page.waitForSelector('a[href*="/p"]', { timeout: 10000 });
-
-    // Extrai todos os links que parecem ser de produtos
-    const productLinks = await page.$$eval('a[href*="/p"]', (elements) => {
-      const hrefs = elements.map((el) => el.href);
-      return [...new Set(hrefs)].slice(0, 10); // Remove duplicados, pega no máximo 10
+    // Pega os links dos produtos (genérico para VTEX, Shopify, etc)
+    const productLinks = await page.$$eval("a[href]", (links) => {
+      return links
+        .map((a) => a.href)
+        .filter((href) => /produto|product|item|/i.test(href))
+        .filter((value, index, self) => self.indexOf(value) === index) // remove duplicados
+        .slice(0, 10);
     });
 
-    if (productLinks.length === 0) {
-      return res.status(404).json({ error: 'Nenhum link de produto encontrado.' });
+    if (productLinks.length === 0) throw new Error("Nenhum link de produto encontrado");
+
+    const htmlSamples = [];
+    for (let i = 0; i < Math.min(limit, productLinks.length); i++) {
+      const productPage = await browser.newPage();
+      await productPage.goto(productLinks[i], { timeout: 60000 });
+      const html = await productPage.content();
+      htmlSamples.push({ url: productLinks[i], html });
+      await productPage.close();
     }
 
-    // Limita quantidade baseada no input do usuário
-    const limitedLinks = productLinks.slice(0, parseInt(limit));
-
-    // Acessa o primeiro link e extrai o HTML completo
-    const productPage = await browser.newPage();
-    await productPage.goto(limitedLinks[0], { waitUntil: 'domcontentloaded', timeout: 60000 });
-    const htmlContent = await productPage.content();
-
     await browser.close();
-
-    return res.json({
-      html: htmlContent,
-      links: limitedLinks
-    });
+    return res.json({ samples: htmlSamples });
   } catch (err) {
-    if (browser) await browser.close();
-    return res.status(500).json({ error: 'Erro no scraping', details: err.message });
+    await browser.close();
+    return res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Scraper online na porta ${PORT}`);
+app.get("/", (req, res) => {
+  res.send("Scraper online 🚀");
+});
+
+app.listen(port, () => {
+  console.log("Scraper online na porta " + port);
 });
