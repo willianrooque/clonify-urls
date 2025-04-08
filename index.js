@@ -1,45 +1,51 @@
 const express = require('express');
 const { chromium } = require('playwright');
+const cors = require('cors');
+
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 app.post('/scrape', async (req, res) => {
   const { url, limit = 5 } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL is required' });
+  if (!url) return res.status(400).json({ error: 'URL não fornecida' });
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  try {
-    await page.goto(url, { timeout: 60000 });
 
-    const productLinks = await page.$$eval('a[href]', (elements) =>
-      [...new Set(elements.map(e => e.href).filter(href =>
-        href.includes('/p') || href.includes('/produto') || href.includes('/product')
-      ))]
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    // ⬇️ Exemplo genérico para VTEX — você pode adaptar depois
+    const productLinks = await page.$$eval('a[href*="/p"]', links =>
+      [...new Set(links.map(link => link.href))].slice(0, 5)
     );
 
     const results = [];
-    for (let i = 0; i < Math.min(limit, productLinks.length); i++) {
-      const link = productLinks[i];
-      const productPage = await browser.newPage();
-      await productPage.goto(link, { timeout: 60000 });
 
-      const title = await productPage.textContent('h1, .product-title, .productName_1r').catch(() => "");
-      const price = await productPage.textContent('.price, .sellingPrice, .price-characteristic').catch(() => "");
-      const image = await productPage.getAttribute('img', 'src').catch(() => "");
-      const description = await productPage.textContent('.productDescription, .description').catch(() => "");
+    for (const link of productLinks.slice(0, limit)) {
+      const prodPage = await browser.newPage();
+      await prodPage.goto(link, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+      const title = await prodPage.$eval('[class*=productName]', el => el.textContent.trim()).catch(() => '');
+      const price = await prodPage.$eval('[class*=sellingPrice]', el => el.textContent.trim()).catch(() => '');
+      const image = await prodPage.$eval('img[src*="products"]', img => img.src).catch(() => '');
+      const description = await prodPage.$eval('div[class*=description]', el => el.textContent.trim()).catch(() => '');
 
       results.push({ link, title, price, image, description });
-      await productPage.close();
+      await prodPage.close();
     }
 
     await browser.close();
     res.json({ results });
   } catch (err) {
     await browser.close();
-    res.status(500).json({ error: err.message });
+    console.error('Erro na raspagem:', err);
+    res.status(500).json({ error: 'Erro ao raspar os produtos.' });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Scraper online na porta ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Scraper online na porta ${PORT}`);
+});
